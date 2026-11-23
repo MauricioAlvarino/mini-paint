@@ -1,9 +1,11 @@
 // ======================================================================
-//  MINI PAINT - COMMIT 2: figuras (linea, triangulo, cuadrado, circulo)
+//  MINI PAINT - COMMIT 3: pincel, paleta de colores y tamano de pincel
 //  Controles:
-//    1 = Linea   2 = Triangulo   3 = Cuadrado   4 = Circulo
-//    Clic izquierdo + arrastrar : dibuja la figura (vista previa)
-//    Soltar el clic             : la figura queda guardada
+//    1 = Linea   2 = Triangulo   3 = Cuadrado   4 = Circulo   5 = Pincel
+//    Clic izquierdo + arrastrar : dibuja la figura (vista previa mientras arrastras)
+//    Soltar el clic             : la figura queda guardada en el lienzo
+//    Clic en la paleta          : cambia el color (el blanco sirve de borrador)
+//    Flecha arriba / abajo, rueda del mouse, + / - : cambia el tamano del pincel
 //    G = grilla    C = limpiar    ESC = salir
 // ======================================================================
 #include <iostream>
@@ -43,11 +45,18 @@ void main()
 )";
 
 // ------------------------ CONFIGURACION DEL LIENZO ---------------------
-// 40 x 30 celdas, cada celda mide 18 x 18 pixeles
+// El area total es de 40 x 35 celdas: 30 filas para dibujar (arriba) y 5 filas
+// para la paleta de colores (abajo). Cada celda mide 18 x 18 pixeles.
 const int COLUMNAS = 40;
-const int FILAS = 30;
+const int FILAS_LIENZO = 30;
+const int FILAS_PALETA = 5;
+const int FILAS = FILAS_LIENZO + FILAS_PALETA;
 const int ANCHO_VENTANA = 720;
-const int ALTO_VENTANA = 540;
+const int ALTO_VENTANA = 630;
+
+// Rango permitido para el tamano del pincel (en celdas)
+const int TAMANO_MIN = 1;
+const int TAMANO_MAX = 8;
 
 // ------------------------------ TIPOS ----------------------------------
 // Una celda de la grilla: fila 0 = abajo, columna 0 = izquierda
@@ -69,7 +78,8 @@ enum Herramienta
     HERRAMIENTA_LINEA,
     HERRAMIENTA_TRIANGULO,
     HERRAMIENTA_CUADRADO,
-    HERRAMIENTA_CIRCULO
+    HERRAMIENTA_CIRCULO,
+    HERRAMIENTA_PINCEL
 };
 
 // ------------------------------ PALETA ---------------------------------
@@ -88,14 +98,18 @@ const Color PALETA[NUM_COLORES] = {
 };
 
 const Color COLOR_GRILLA = { 0.75f, 0.75f, 0.75f };
+const Color COLOR_FONDO_PALETA = { 0.70f, 0.70f, 0.70f };
+const Color COLOR_MARCADOR = { 0.00f, 0.00f, 0.00f };
 
 // --------------------------- ESTADO GLOBAL -----------------------------
 Herramienta herramientaActual = HERRAMIENTA_LINEA;
 int colorActual = 7;            // indice en PALETA (empieza en azul)
+int tamanoPincel = 1;           // lado del pincel, en celdas
 bool mostrarGrilla = true;      // true = se dibujan las lineas de la grilla
 bool dibujando = false;         // true mientras el clic izquierdo esta presionado
 
 int filaInicio = 0, colInicio = 0;   // celda donde se hizo clic (inicio de la figura)
+int ultimaFila = 0, ultimaCol = 0;   // ultima celda visitada por el pincel
 
 // Lienzo: una casilla por celda. 0 = vacia; k > 0 = pintada con PALETA[k - 1]
 std::vector<unsigned char> lienzo(FILAS * COLUMNAS, 0);
@@ -103,14 +117,19 @@ std::vector<unsigned char> lienzo(FILAS * COLUMNAS, 0);
 // Vista previa: celdas de la figura que se esta dibujando ahora mismo
 std::vector<Celda> vistaPrevia;
 
+// Recorrido "crudo" del pincel (sin engrosar), celda por celda
+std::vector<Celda> trazoPincel;
+
 // Identificadores de OpenGL (globales porque los callbacks los necesitan)
 unsigned int VAOGrilla = 0, VBOGrilla = 0;
 unsigned int VAOLienzo = 0, VBOLienzo = 0;
 unsigned int VAOPrevia = 0, VBOPrevia = 0;
+unsigned int VAOPaleta = 0, VBOPaleta = 0;
 
 int verticesGrilla = 0;   // cantidad de vertices de cada buffer (para glDrawArrays)
 int verticesLienzo = 0;
 int verticesPrevia = 0;
+int verticesPaleta = 0;
 
 // ---------------------- UTILIDADES DE OPENGL ---------------------------
 
@@ -210,21 +229,22 @@ void agregarRectangulo(std::vector<float>& v, int fila, int col, int alto, int a
     agregarVertice(v, xDer, yArriba, c);
 }
 
-// Genera las lineas de la grilla
+// Genera las lineas de la grilla, SOLO sobre el area de dibujo (no sobre la paleta)
 std::vector<float> crearVerticesGrilla()
 {
     std::vector<float> v;
     float tamX = 2.0f / COLUMNAS;
     float tamY = 2.0f / FILAS;
+    float yBase = -1.0f + FILAS_PALETA * tamY;   // borde inferior del lienzo
 
     for (int i = 0; i <= COLUMNAS; i++)           // lineas verticales
     {
         float x = -1.0f + i * tamX;
         agregarVertice(v, x, 1.0f, COLOR_GRILLA);
-        agregarVertice(v, x, -1.0f, COLOR_GRILLA);
+        agregarVertice(v, x, yBase, COLOR_GRILLA);
     }
 
-    for (int j = 0; j <= FILAS; j++)              // lineas horizontales
+    for (int j = FILAS_PALETA; j <= FILAS; j++)   // lineas horizontales
     {
         float y = -1.0f + j * tamY;
         agregarVertice(v, -1.0f, y, COLOR_GRILLA);
@@ -245,10 +265,10 @@ std::vector<float> celdasAVertices(const std::vector<Celda>& celdas, const Color
 
 // ------------------------- LOGICA DEL LIENZO ---------------------------
 
-// Una celda es valida si esta dentro del lienzo
+// Una celda es valida si esta dentro del AREA DE DIBUJO (la paleta no cuenta)
 bool celdaValida(int fila, int col)
 {
-    return fila >= 0 && fila < FILAS && col >= 0 && col < COLUMNAS;
+    return fila >= FILAS_PALETA && fila < FILAS && col >= 0 && col < COLUMNAS;
 }
 
 // Convierte la posicion del mouse (pixeles) en una celda (fila, columna)
@@ -424,7 +444,7 @@ std::vector<Celda> figuraCirculo(int colIni, int filaIni, int colFin, int filaFi
     return bresenhamCirculo(filaIni, colIni, radio);
 }
 
-// Elige la figura segun la herramienta activa
+// Elige la figura segun la herramienta activa (el pincel se maneja aparte)
 std::vector<Celda> calcularFigura(Herramienta herramienta, int colIni, int filaIni, int colFin, int filaFin)
 {
     std::vector<Celda> celdas;
@@ -443,9 +463,42 @@ std::vector<Celda> calcularFigura(Herramienta herramienta, int colIni, int filaI
     case HERRAMIENTA_CIRCULO:
         celdas = figuraCirculo(colIni, filaIni, colFin, filaFin);
         break;
+    case HERRAMIENTA_PINCEL:
+        break;
     }
 
     return filtrarValidas(celdas);
+}
+
+// TAMANO DEL PINCEL: cada celda de la figura se convierte en un cuadrado de
+// "tamano x tamano" celdas. Se usa una marca para no repetir celdas.
+std::vector<Celda> engrosar(const std::vector<Celda>& celdas, int tamano)
+{
+    std::vector<unsigned char> marca(FILAS * COLUMNAS, 0);
+    std::vector<Celda> resultado;
+
+    int atras = (tamano - 1) / 2;   // celdas hacia abajo / izquierda
+    int adelante = tamano / 2;      // celdas hacia arriba / derecha
+
+    for (const Celda& c : celdas)
+    {
+        for (int df = -atras; df <= adelante; df++)
+        {
+            for (int dc = -atras; dc <= adelante; dc++)
+            {
+                int f = c.fila + df;
+                int k = c.col + dc;
+
+                if (celdaValida(f, k) && marca[f * COLUMNAS + k] == 0)
+                {
+                    marca[f * COLUMNAS + k] = 1;
+                    resultado.push_back({ f, k });
+                }
+            }
+        }
+    }
+
+    return resultado;
 }
 
 // ----------------------- BUFFERS Y ESTADO DEL DIBUJO -------------------
@@ -455,7 +508,7 @@ void actualizarBufferLienzo()
 {
     std::vector<float> v;
 
-    for (int fila = 0; fila < FILAS; fila++)
+    for (int fila = FILAS_PALETA; fila < FILAS; fila++)
     {
         for (int col = 0; col < COLUMNAS; col++)
         {
@@ -474,6 +527,26 @@ void actualizarBufferPrevia()
     verticesPrevia = subirDatos(VBOPrevia, celdasAVertices(vistaPrevia, PALETA[colorActual]), GL_DYNAMIC_DRAW);
 }
 
+// Dibuja la barra de la paleta: fondo gris, una muestra por color y un marcador
+// negro debajo de la muestra seleccionada
+void actualizarBufferPaleta()
+{
+    std::vector<float> v;
+
+    agregarRectangulo(v, 0, 0, FILAS_PALETA, COLUMNAS, COLOR_FONDO_PALETA);
+
+    for (int i = 0; i < NUM_COLORES; i++)
+    {
+        int col0 = i * 4;   // cada muestra ocupa 3 columnas y deja 1 de separacion
+        agregarRectangulo(v, 1, col0, 3, 3, PALETA[i]);
+
+        if (i == colorActual)
+            agregarRectangulo(v, 0, col0, 1, 3, COLOR_MARCADOR);
+    }
+
+    verticesPaleta = subirDatos(VBOPaleta, v, GL_DYNAMIC_DRAW);
+}
+
 // Pasa las celdas de la vista previa al lienzo con el color actual
 void confirmarFigura()
 {
@@ -481,6 +554,7 @@ void confirmarFigura()
         lienzo[c.fila * COLUMNAS + c.col] = (unsigned char)(colorActual + 1);
 
     vistaPrevia.clear();
+    trazoPincel.clear();
     actualizarBufferLienzo();
     actualizarBufferPrevia();
 }
@@ -490,6 +564,7 @@ void limpiarLienzo()
 {
     std::fill(lienzo.begin(), lienzo.end(), 0);
     vistaPrevia.clear();
+    trazoPincel.clear();
     actualizarBufferLienzo();
     actualizarBufferPrevia();
 }
@@ -503,19 +578,42 @@ const char* nombreHerramienta(Herramienta h)
     case HERRAMIENTA_TRIANGULO: return "Triangulo";
     case HERRAMIENTA_CUADRADO:  return "Cuadrado";
     case HERRAMIENTA_CIRCULO:   return "Circulo";
+    case HERRAMIENTA_PINCEL:    return "Pincel";
     }
     return "?";
 }
 
-// Muestra en la barra de titulo la herramienta y el estado de la grilla
+// Muestra en la barra de titulo la herramienta, el tamano y el estado de la grilla
 void actualizarTitulo(GLFWwindow* window)
 {
     std::string titulo = "Mini Paint | Herramienta: ";
     titulo += nombreHerramienta(herramientaActual);
+    titulo += " | Tamano: " + std::to_string(tamanoPincel);
     titulo += " | Grilla: ";
     titulo += mostrarGrilla ? "ON" : "OFF";
-    titulo += "  (1-4 herramienta, G = grilla, C = limpiar)";
+    titulo += "  (1-5 herramienta, flechas/rueda = tamano, G = grilla, C = limpiar)";
     glfwSetWindowTitle(window, titulo.c_str());
+}
+
+// Cambia el tamano del pincel sin salirse del rango permitido
+void cambiarTamano(GLFWwindow* window, int cambio)
+{
+    tamanoPincel = std::max(TAMANO_MIN, std::min(TAMANO_MAX, tamanoPincel + cambio));
+    actualizarTitulo(window);
+}
+
+// Si el clic cayo sobre una muestra de la paleta, la selecciona
+void seleccionarColorEnPaleta(GLFWwindow* window, int fila, int col)
+{
+    int indice = col / 4;       // que muestra es
+    int resto = col % 4;        // 3 = columna de separacion (no es muestra)
+
+    if (indice < NUM_COLORES && resto < 3 && fila >= 1 && fila <= 3)
+    {
+        colorActual = indice;
+        actualizarBufferPaleta();
+        actualizarTitulo(window);
+    }
 }
 
 // ----------------------------- CALLBACKS -------------------------------
@@ -538,11 +636,21 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
         int fila, col;
         pixelACelda(window, xpos, ypos, fila, col);
 
+        // Clic en la barra de la paleta: elegir color y no dibujar
+        if (fila < FILAS_PALETA)
+        {
+            seleccionarColorEnPaleta(window, fila, col);
+            return;
+        }
+
         dibujando = true;
         filaInicio = fila;
         colInicio = col;
+        ultimaFila = fila;
+        ultimaCol = col;
 
-        vistaPrevia = { { fila, col } };
+        trazoPincel = { { fila, col } };
+        vistaPrevia = engrosar({ { fila, col } }, tamanoPincel);
         actualizarBufferPrevia();
     }
     else if (action == GLFW_RELEASE && dibujando)
@@ -560,12 +668,58 @@ void cursor_position_callback(GLFWwindow* window, double xpos, double ypos)
     int filaFin, colFin;
     pixelACelda(window, xpos, ypos, filaFin, colFin);
 
-    vistaPrevia = calcularFigura(herramientaActual, colInicio, filaInicio, colFin, filaFin);
+    // Mientras se dibuja, el mouse no puede entrar a la paleta
+    if (filaFin < FILAS_PALETA)
+        filaFin = FILAS_PALETA;
+
+    if (herramientaActual == HERRAMIENTA_PINCEL)
+    {
+        // Trazo libre: se unen las celdas por donde pasa el mouse con lineas de Bresenham
+        if (filaFin == ultimaFila && colFin == ultimaCol)
+            return;
+
+        agregarCeldas(trazoPincel, bresenhamLinea(ultimaCol, ultimaFila, colFin, filaFin));
+        ultimaFila = filaFin;
+        ultimaCol = colFin;
+        vistaPrevia = engrosar(trazoPincel, tamanoPincel);
+    }
+    else
+    {
+        // Figura (linea, triangulo, cuadrado o circulo) con el grosor elegido
+        vistaPrevia = engrosar(calcularFigura(herramientaActual, colInicio, filaInicio, colFin, filaFin), tamanoPincel);
+    }
+
     actualizarBufferPrevia();
+}
+
+// La rueda del mouse cambia el tamano del pincel
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
+{
+    cambiarTamano(window, yoffset > 0 ? 1 : -1);
 }
 
 void key_callback(GLFWwindow* window, int key, int scancode, int action, int mods)
 {
+    if (action == GLFW_RELEASE)
+        return;
+
+    // El tamano acepta tecla mantenida (REPEAT); el resto solo al presionar
+    switch (key)
+    {
+    case GLFW_KEY_UP:
+    case GLFW_KEY_KP_ADD:
+    case GLFW_KEY_EQUAL:
+    case GLFW_KEY_RIGHT_BRACKET:    // la tecla "+" de un teclado en espanol
+        cambiarTamano(window, 1);
+        return;
+    case GLFW_KEY_DOWN:
+    case GLFW_KEY_KP_SUBTRACT:
+    case GLFW_KEY_MINUS:
+    case GLFW_KEY_SLASH:            // la tecla "-" de un teclado en espanol
+        cambiarTamano(window, -1);
+        return;
+    }
+
     if (action != GLFW_PRESS)
         return;
 
@@ -592,6 +746,10 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         break;
     case GLFW_KEY_4:
         herramientaActual = HERRAMIENTA_CIRCULO;
+        actualizarTitulo(window);
+        break;
+    case GLFW_KEY_5:
+        herramientaActual = HERRAMIENTA_PINCEL;
         actualizarTitulo(window);
         break;
     case GLFW_KEY_ESCAPE:
@@ -626,6 +784,7 @@ int main()
     glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
     glfwSetMouseButtonCallback(window, mouse_button_callback);
     glfwSetCursorPosCallback(window, cursor_position_callback);
+    glfwSetScrollCallback(window, scroll_callback);
     glfwSetKeyCallback(window, key_callback);
 
     if (!gladLoadGL(glfwGetProcAddress))
@@ -638,12 +797,14 @@ int main()
 
     unsigned int programa = crearPrograma();
 
-    // Tres buffers: grilla (fija), lienzo y vista previa
+    // Cuatro buffers: grilla (fija), lienzo, vista previa y paleta
     crearBuffer(VAOGrilla, VBOGrilla);
     crearBuffer(VAOLienzo, VBOLienzo);
     crearBuffer(VAOPrevia, VBOPrevia);
+    crearBuffer(VAOPaleta, VBOPaleta);
 
     verticesGrilla = subirDatos(VBOGrilla, crearVerticesGrilla(), GL_STATIC_DRAW);
+    actualizarBufferPaleta();
     actualizarTitulo(window);
 
     while (!glfwWindowShouldClose(window))
@@ -660,7 +821,7 @@ int main()
             glDrawArrays(GL_TRIANGLES, 0, verticesLienzo);
         }
 
-        // 2) Vista previa de la figura en curso
+        // 2) Vista previa de la figura en curso (con el color elegido)
         if (verticesPrevia > 0)
         {
             glBindVertexArray(VAOPrevia);
@@ -674,6 +835,10 @@ int main()
             glDrawArrays(GL_LINES, 0, verticesGrilla);
         }
 
+        // 4) Barra de la paleta
+        glBindVertexArray(VAOPaleta);
+        glDrawArrays(GL_TRIANGLES, 0, verticesPaleta);
+
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
@@ -684,6 +849,8 @@ int main()
     glDeleteBuffers(1, &VBOLienzo);
     glDeleteVertexArrays(1, &VAOPrevia);
     glDeleteBuffers(1, &VBOPrevia);
+    glDeleteVertexArrays(1, &VAOPaleta);
+    glDeleteBuffers(1, &VBOPaleta);
     glDeleteProgram(programa);
 
     glfwDestroyWindow(window);
