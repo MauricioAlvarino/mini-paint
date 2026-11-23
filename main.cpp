@@ -1,12 +1,16 @@
 // ======================================================================
-//  MINI PAINT - COMMIT 4: relleno de primitivas
+//  MINI PAINT - COMMIT 5: forma libre (poligono) con relleno opcional
 //  Controles:
 //    1 = Linea   2 = Triangulo   3 = Cuadrado   4 = Circulo   5 = Pincel
+//    6 = Poligono libre
 //    Clic izquierdo + arrastrar : dibuja la figura (vista previa mientras arrastras)
 //    Soltar el clic             : la figura queda guardada en el lienzo
+//    Poligono libre             : cada clic agrega un vertice
+//                                 Enter o clic derecho = cerrar y guardar
+//                                 Backspace = quitar ultimo vertice, ESC = cancelar
 //    Clic en la paleta          : cambia el color (el blanco sirve de borrador)
 //    Flecha arriba / abajo, rueda del mouse, + / - : cambia el tamano del pincel
-//    F = relleno de figuras (triangulo, cuadrado, circulo) ON/OFF
+//    F = relleno de figuras (triangulo, cuadrado, circulo, poligono) ON/OFF
 //    G = grilla    C = limpiar    ESC = salir
 // ======================================================================
 #include <iostream>
@@ -80,7 +84,8 @@ enum Herramienta
     HERRAMIENTA_TRIANGULO,
     HERRAMIENTA_CUADRADO,
     HERRAMIENTA_CIRCULO,
-    HERRAMIENTA_PINCEL
+    HERRAMIENTA_PINCEL,
+    HERRAMIENTA_POLIGONO
 };
 
 // ------------------------------ PALETA ---------------------------------
@@ -121,6 +126,10 @@ std::vector<Celda> vistaPrevia;
 
 // Recorrido "crudo" del pincel (sin engrosar), celda por celda
 std::vector<Celda> trazoPincel;
+
+// Poligono libre: vertices ya puestos con clic y ultima celda donde estuvo el mouse
+std::vector<Celda> verticesPoligono;
+int cursorFila = FILAS_PALETA, cursorCol = 0;
 
 // Identificadores de OpenGL (globales porque los callbacks los necesitan)
 unsigned int VAOGrilla = 0, VBOGrilla = 0;
@@ -482,7 +491,7 @@ std::vector<Celda> rellenarFilas(const std::vector<Celda>& contorno)
     return relleno;
 }
 
-// Elige la figura segun la herramienta activa (el pincel se maneja aparte).
+// Elige la figura segun la herramienta activa (el pincel y el poligono se manejan aparte).
 // Si "relleno" es true, el triangulo, el cuadrado y el circulo salen rellenos.
 std::vector<Celda> calcularFigura(Herramienta herramienta, int colIni, int filaIni, int colFin, int filaFin, bool relleno)
 {
@@ -503,12 +512,101 @@ std::vector<Celda> calcularFigura(Herramienta herramienta, int colIni, int filaI
         celdas = figuraCirculo(colIni, filaIni, colFin, filaFin);
         break;
     case HERRAMIENTA_PINCEL:
+    case HERRAMIENTA_POLIGONO:
         break;
     }
 
-    // La linea y el pincel no tienen interior, por eso no se rellenan
-    if (relleno && herramienta != HERRAMIENTA_LINEA && herramienta != HERRAMIENTA_PINCEL)
+    // La linea, el pincel y el poligono no usan este relleno
+    if (relleno && herramienta != HERRAMIENTA_LINEA
+                && herramienta != HERRAMIENTA_PINCEL
+                && herramienta != HERRAMIENTA_POLIGONO)
         celdas = rellenarFilas(celdas);
+
+    return filtrarValidas(celdas);
+}
+
+// ------------------------- FORMA LIBRE (POLIGONO) ----------------------
+
+// Contorno del poligono: une cada vertice con el siguiente usando Bresenham.
+// Si "cerrar" es true (y hay 3 o mas vertices), une tambien el ultimo con el primero.
+std::vector<Celda> contornoPoligono(const std::vector<Celda>& v, bool cerrar)
+{
+    std::vector<Celda> celdas;
+
+    if (v.empty())
+        return celdas;
+
+    if (v.size() == 1)
+    {
+        celdas.push_back(v[0]);
+        return celdas;
+    }
+
+    for (size_t i = 0; i + 1 < v.size(); i++)
+        agregarCeldas(celdas, bresenhamLinea(v[i].col, v[i].fila, v[i + 1].col, v[i + 1].fila));
+
+    if (cerrar && v.size() >= 3)
+        agregarCeldas(celdas, bresenhamLinea(v.back().col, v.back().fila, v[0].col, v[0].fila));
+
+    return celdas;
+}
+
+// RELLENO DE POLIGONO (scanline con regla par-impar): funciona tambien con formas
+// concavas. Para cada fila se buscan los cruces con los lados del poligono, se
+// ordenan de izquierda a derecha y se pintan los tramos entre cruce 1-2, 3-4, etc.
+std::vector<Celda> rellenarPoligono(const std::vector<Celda>& v)
+{
+    std::vector<Celda> relleno;
+    if (v.size() < 3)
+        return relleno;
+
+    int minF = v[0].fila;
+    int maxF = v[0].fila;
+    for (const Celda& c : v)
+    {
+        minF = std::min(minF, c.fila);
+        maxF = std::max(maxF, c.fila);
+    }
+
+    for (int fila = minF; fila <= maxF; fila++)
+    {
+        std::vector<double> cruces;
+
+        for (size_t i = 0; i < v.size(); i++)
+        {
+            const Celda& a = v[i];
+            const Celda& b = v[(i + 1) % v.size()];
+
+            // Regla de intervalo semiabierto: el lado cruza la fila si un extremo
+            // esta en "fila" o por debajo y el otro estrictamente por encima
+            if ((a.fila <= fila && b.fila > fila) || (b.fila <= fila && a.fila > fila))
+            {
+                double x = a.col + (double)(fila - a.fila) * (b.col - a.col) / (double)(b.fila - a.fila);
+                cruces.push_back(x);
+            }
+        }
+
+        std::sort(cruces.begin(), cruces.end());
+
+        for (size_t i = 0; i + 1 < cruces.size(); i += 2)
+        {
+            int col0 = (int)std::ceil(cruces[i]);
+            int col1 = (int)std::floor(cruces[i + 1]);
+            for (int col = col0; col <= col1; col++)
+                relleno.push_back({ fila, col });
+        }
+    }
+
+    return relleno;
+}
+
+// Celdas del poligono completo: contorno + (si hay relleno) el interior
+std::vector<Celda> calcularPoligono(const std::vector<Celda>& v, bool cerrar, bool relleno)
+{
+    std::vector<Celda> celdas = contornoPoligono(v, cerrar);
+
+    if (relleno && v.size() >= 3)
+        agregarCeldas(celdas, rellenarPoligono(v));
 
     return filtrarValidas(celdas);
 }
@@ -602,12 +700,51 @@ void confirmarFigura()
     actualizarBufferPrevia();
 }
 
+// Vista previa del poligono en curso: los vertices puestos + el mouse como
+// vertice temporal. Con relleno activo se muestra ya cerrado y relleno.
+void actualizarVistaPoligono()
+{
+    if (verticesPoligono.empty())
+    {
+        vistaPrevia.clear();
+        actualizarBufferPrevia();
+        return;
+    }
+
+    std::vector<Celda> temporal = verticesPoligono;
+    temporal.push_back({ cursorFila, cursorCol });
+
+    vistaPrevia = engrosar(calcularPoligono(temporal, rellenoActivo, rellenoActivo), tamanoPincel);
+    actualizarBufferPrevia();
+}
+
+// Cierra el poligono (une el ultimo vertice con el primero), lo rellena si
+// corresponde y lo guarda en el lienzo
+void cerrarPoligono()
+{
+    if (verticesPoligono.empty())
+        return;
+
+    vistaPrevia = engrosar(calcularPoligono(verticesPoligono, true, rellenoActivo), tamanoPincel);
+    confirmarFigura();
+    verticesPoligono.clear();
+}
+
+// Descarta el poligono en curso sin guardarlo
+void cancelarPoligono()
+{
+    verticesPoligono.clear();
+    vistaPrevia.clear();
+    actualizarBufferPrevia();
+}
+
 // Borra todo el lienzo
 void limpiarLienzo()
 {
     std::fill(lienzo.begin(), lienzo.end(), 0);
     vistaPrevia.clear();
     trazoPincel.clear();
+    verticesPoligono.clear();
     actualizarBufferLienzo();
     actualizarBufferPrevia();
 }
@@ -622,6 +759,7 @@ const char* nombreHerramienta(Herramienta h)
     case HERRAMIENTA_CUADRADO:  return "Cuadrado";
     case HERRAMIENTA_CIRCULO:   return "Circulo";
     case HERRAMIENTA_PINCEL:    return "Pincel";
+    case HERRAMIENTA_POLIGONO:  return "Poligono libre";
     }
     return "?";
 }
@@ -636,8 +774,18 @@ void actualizarTitulo(GLFWwindow* window)
     titulo += rellenoActivo ? "ON" : "OFF";
     titulo += " | Grilla: ";
     titulo += mostrarGrilla ? "ON" : "OFF";
-    titulo += "  (1-5 herramienta, F = relleno, flechas/rueda = tamano, G = grilla, C = limpiar)";
+    titulo += "  (1-6 herramienta, F = relleno, Enter/clic der = cerrar poligono, G = grilla, C = limpiar)";
     glfwSetWindowTitle(window, titulo.c_str());
+}
+
+// Cambia de herramienta (si habia un poligono a medias, se cancela)
+void seleccionarHerramienta(GLFWwindow* window, Herramienta nueva)
+{
+    if (nueva != herramientaActual)
+        cancelarPoligono();
+
+    herramientaActual = nueva;
+    actualizarTitulo(window);
 }
 
 // Cambia el tamano del pincel sin salirse del rango permitido
@@ -670,6 +818,14 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 {
+    // Clic derecho: cierra el poligono en curso
+    if (button == GLFW_MOUSE_BUTTON_RIGHT)
+    {
+        if (action == GLFW_PRESS && herramientaActual == HERRAMIENTA_POLIGONO)
+            cerrarPoligono();
+        return;
+    }
+
     if (button != GLFW_MOUSE_BUTTON_LEFT)
         return;
 
@@ -685,6 +841,22 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
         if (fila < FILAS_PALETA)
         {
             seleccionarColorEnPaleta(window, fila, col);
+            return;
+        }
+
+        // Poligono libre: cada clic agrega un vertice (sin repetir el ultimo)
+        if (herramientaActual == HERRAMIENTA_POLIGONO)
+        {
+            bool repetido = !verticesPoligono.empty()
+                         && verticesPoligono.back().fila == fila
+                         && verticesPoligono.back().col == col;
+
+            if (!repetido)
+                verticesPoligono.push_back({ fila, col });
+
+            cursorFila = fila;
+            cursorCol = col;
+            actualizarVistaPoligono();
             return;
         }
 
@@ -707,15 +879,25 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 
 void cursor_position_callback(GLFWwindow* window, double xpos, double ypos)
 {
-    if (!dibujando)
-        return;
-
     int filaFin, colFin;
     pixelACelda(window, xpos, ypos, filaFin, colFin);
 
-    // Mientras se dibuja, el mouse no puede entrar a la paleta
+    // El mouse no puede entrar a la paleta mientras se dibuja
     if (filaFin < FILAS_PALETA)
         filaFin = FILAS_PALETA;
+
+    // Poligono libre: la vista previa sigue al mouse aunque no haya clic presionado
+    if (herramientaActual == HERRAMIENTA_POLIGONO)
+    {
+        cursorFila = filaFin;
+        cursorCol = colFin;
+        if (!verticesPoligono.empty())
+            actualizarVistaPoligono();
+        return;
+    }
+
+    if (!dibujando)
+        return;
 
     if (herramientaActual == HERRAMIENTA_PINCEL)
     {
@@ -777,32 +959,47 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     case GLFW_KEY_F:
         rellenoActivo = !rellenoActivo;   // alternar relleno
         actualizarTitulo(window);
+        if (herramientaActual == HERRAMIENTA_POLIGONO)
+            actualizarVistaPoligono();
         break;
     case GLFW_KEY_C:
         limpiarLienzo();
         break;
     case GLFW_KEY_1:
-        herramientaActual = HERRAMIENTA_LINEA;
-        actualizarTitulo(window);
+        seleccionarHerramienta(window, HERRAMIENTA_LINEA);
         break;
     case GLFW_KEY_2:
-        herramientaActual = HERRAMIENTA_TRIANGULO;
-        actualizarTitulo(window);
+        seleccionarHerramienta(window, HERRAMIENTA_TRIANGULO);
         break;
     case GLFW_KEY_3:
-        herramientaActual = HERRAMIENTA_CUADRADO;
-        actualizarTitulo(window);
+        seleccionarHerramienta(window, HERRAMIENTA_CUADRADO);
         break;
     case GLFW_KEY_4:
-        herramientaActual = HERRAMIENTA_CIRCULO;
-        actualizarTitulo(window);
+        seleccionarHerramienta(window, HERRAMIENTA_CIRCULO);
         break;
     case GLFW_KEY_5:
-        herramientaActual = HERRAMIENTA_PINCEL;
-        actualizarTitulo(window);
+        seleccionarHerramienta(window, HERRAMIENTA_PINCEL);
+        break;
+    case GLFW_KEY_6:
+        seleccionarHerramienta(window, HERRAMIENTA_POLIGONO);
+        break;
+    case GLFW_KEY_ENTER:
+    case GLFW_KEY_KP_ENTER:
+        if (herramientaActual == HERRAMIENTA_POLIGONO)
+            cerrarPoligono();
+        break;
+    case GLFW_KEY_BACKSPACE:
+        if (herramientaActual == HERRAMIENTA_POLIGONO && !verticesPoligono.empty())
+        {
+            verticesPoligono.pop_back();
+            actualizarVistaPoligono();
+        }
         break;
     case GLFW_KEY_ESCAPE:
-        glfwSetWindowShouldClose(window, true);
+        if (!verticesPoligono.empty())
+            cancelarPoligono();                  // primero cancela el poligono en curso
+        else
+            glfwSetWindowShouldClose(window, true);
         break;
     }
 }
