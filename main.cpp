@@ -1,8 +1,9 @@
 // ======================================================================
-//  MINI PAINT - COMMIT 1: ventana, grilla, lienzo por celdas y linea
+//  MINI PAINT - COMMIT 2: figuras (linea, triangulo, cuadrado, circulo)
 //  Controles:
-//    Clic izquierdo + arrastrar : dibuja una linea (vista previa)
-//    Soltar el clic             : la linea queda guardada
+//    1 = Linea   2 = Triangulo   3 = Cuadrado   4 = Circulo
+//    Clic izquierdo + arrastrar : dibuja la figura (vista previa)
+//    Soltar el clic             : la figura queda guardada
 //    G = grilla    C = limpiar    ESC = salir
 // ======================================================================
 #include <iostream>
@@ -62,6 +63,15 @@ struct Color
     float r, g, b;
 };
 
+// Herramientas del programa
+enum Herramienta
+{
+    HERRAMIENTA_LINEA,
+    HERRAMIENTA_TRIANGULO,
+    HERRAMIENTA_CUADRADO,
+    HERRAMIENTA_CIRCULO
+};
+
 // ------------------------------ PALETA ---------------------------------
 const int NUM_COLORES = 10;
 const Color PALETA[NUM_COLORES] = {
@@ -80,11 +90,12 @@ const Color PALETA[NUM_COLORES] = {
 const Color COLOR_GRILLA = { 0.75f, 0.75f, 0.75f };
 
 // --------------------------- ESTADO GLOBAL -----------------------------
+Herramienta herramientaActual = HERRAMIENTA_LINEA;
 int colorActual = 7;            // indice en PALETA (empieza en azul)
 bool mostrarGrilla = true;      // true = se dibujan las lineas de la grilla
 bool dibujando = false;         // true mientras el clic izquierdo esta presionado
 
-int filaInicio = 0, colInicio = 0;   // celda donde se hizo clic
+int filaInicio = 0, colInicio = 0;   // celda donde se hizo clic (inicio de la figura)
 
 // Lienzo: una casilla por celda. 0 = vacia; k > 0 = pintada con PALETA[k - 1]
 std::vector<unsigned char> lienzo(FILAS * COLUMNAS, 0);
@@ -299,13 +310,15 @@ std::vector<Celda> bresenhamLinea(int col0, int fila0, int col1, int fila1)
     return celdas;
 }
 
+// ---------------------- FIGURAS (usan Bresenham) -----------------------
+
 // Agrega al final de "destino" todas las celdas de "origen"
 void agregarCeldas(std::vector<Celda>& destino, const std::vector<Celda>& origen)
 {
     destino.insert(destino.end(), origen.begin(), origen.end());
 }
 
-// Descarta las celdas que quedaron fuera del lienzo
+// Descarta las celdas que quedaron fuera del lienzo (una figura puede salirse del borde)
 std::vector<Celda> filtrarValidas(const std::vector<Celda>& celdas)
 {
     std::vector<Celda> validas;
@@ -313,6 +326,126 @@ std::vector<Celda> filtrarValidas(const std::vector<Celda>& celdas)
         if (celdaValida(c.fila, c.col))
             validas.push_back(c);
     return validas;
+}
+
+// Algoritmo del punto medio (Bresenham) para circunferencias.
+// Solo calcula UN octante; los otros 7 salen por simetria.
+std::vector<Celda> bresenhamCirculo(int filaC, int colC, int radio)
+{
+    std::vector<Celda> celdas;
+
+    int x = 0;
+    int y = radio;
+    int p = 1 - radio;      // parametro de decision inicial: P0 = 1 - R
+
+    // Dado un punto (x, y) del octante, agrega sus 8 simetrias alrededor del centro
+    auto agregarOctantes = [&](int x, int y)
+    {
+        celdas.push_back({ filaC + y, colC + x });
+        celdas.push_back({ filaC + x, colC + y });
+        celdas.push_back({ filaC + x, colC - y });
+        celdas.push_back({ filaC + y, colC - x });
+        celdas.push_back({ filaC - y, colC - x });
+        celdas.push_back({ filaC - x, colC - y });
+        celdas.push_back({ filaC - x, colC + y });
+        celdas.push_back({ filaC - y, colC + x });
+    };
+
+    agregarOctantes(x, y);
+
+    while (x < y)           // se detiene al llegar a la diagonal de 45 grados
+    {
+        x = x + 1;          // X siempre avanza una celda
+
+        if (p < 0)          // caso 1: Y no cambia
+        {
+            p = p + 2 * x + 1;
+        }
+        else                // caso 2: Y baja una celda
+        {
+            y = y - 1;
+            p = p + 2 * x - 2 * y + 1;
+        }
+
+        agregarOctantes(x, y);
+    }
+
+    return celdas;
+}
+
+// TRIANGULO: la base queda en la fila donde se hizo clic y la punta en la fila del mouse.
+std::vector<Celda> figuraTriangulo(int colIni, int filaIni, int colFin, int filaFin)
+{
+    std::vector<Celda> celdas;
+
+    int izq = std::min(colIni, colFin);
+    int der = std::max(colIni, colFin);
+    int medio = (izq + der) / 2;
+
+    agregarCeldas(celdas, bresenhamLinea(izq, filaIni, der, filaIni));      // base
+    agregarCeldas(celdas, bresenhamLinea(der, filaIni, medio, filaFin));    // lado derecho
+    agregarCeldas(celdas, bresenhamLinea(medio, filaFin, izq, filaIni));    // lado izquierdo
+
+    return celdas;
+}
+
+// CUADRADO: el clic es una esquina y el lado es la mayor distancia (horizontal o vertical)
+std::vector<Celda> figuraCuadrado(int colIni, int filaIni, int colFin, int filaFin)
+{
+    std::vector<Celda> celdas;
+
+    int dx = colFin - colIni;
+    int dy = filaFin - filaIni;
+    int lado = std::max(std::abs(dx), std::abs(dy));
+    int sx = (dx >= 0) ? 1 : -1;
+    int sy = (dy >= 0) ? 1 : -1;
+
+    int col1 = colIni + sx * lado;      // esquina opuesta
+    int fila1 = filaIni + sy * lado;
+
+    agregarCeldas(celdas, bresenhamLinea(colIni, filaIni, col1, filaIni));
+    agregarCeldas(celdas, bresenhamLinea(col1, filaIni, col1, fila1));
+    agregarCeldas(celdas, bresenhamLinea(col1, fila1, colIni, fila1));
+    agregarCeldas(celdas, bresenhamLinea(colIni, fila1, colIni, filaIni));
+
+    return celdas;
+}
+
+// CIRCULO: el clic es el centro y el radio es la distancia (Pitagoras) hasta el mouse
+std::vector<Celda> figuraCirculo(int colIni, int filaIni, int colFin, int filaFin)
+{
+    int dFila = filaFin - filaIni;
+    int dCol = colFin - colIni;
+    int radio = (int)std::round(std::sqrt((double)(dFila * dFila + dCol * dCol)));
+
+    if (radio <= 0)
+        return { { filaIni, colIni } };     // sin movimiento: solo el centro
+
+    return bresenhamCirculo(filaIni, colIni, radio);
+}
+
+// Elige la figura segun la herramienta activa
+std::vector<Celda> calcularFigura(Herramienta herramienta, int colIni, int filaIni, int colFin, int filaFin)
+{
+    std::vector<Celda> celdas;
+
+    switch (herramienta)
+    {
+    case HERRAMIENTA_LINEA:
+        celdas = bresenhamLinea(colIni, filaIni, colFin, filaFin);
+        break;
+    case HERRAMIENTA_TRIANGULO:
+        celdas = figuraTriangulo(colIni, filaIni, colFin, filaFin);
+        break;
+    case HERRAMIENTA_CUADRADO:
+        celdas = figuraCuadrado(colIni, filaIni, colFin, filaFin);
+        break;
+    case HERRAMIENTA_CIRCULO:
+        celdas = figuraCirculo(colIni, filaIni, colFin, filaFin);
+        break;
+    }
+
+    return filtrarValidas(celdas);
 }
 
 // ----------------------- BUFFERS Y ESTADO DEL DIBUJO -------------------
@@ -361,12 +494,27 @@ void limpiarLienzo()
     actualizarBufferPrevia();
 }
 
-// Muestra en la barra de titulo el estado de la grilla
+// Nombre de la herramienta activa (para la barra de titulo)
+const char* nombreHerramienta(Herramienta h)
+{
+    switch (h)
+    {
+    case HERRAMIENTA_LINEA:     return "Linea";
+    case HERRAMIENTA_TRIANGULO: return "Triangulo";
+    case HERRAMIENTA_CUADRADO:  return "Cuadrado";
+    case HERRAMIENTA_CIRCULO:   return "Circulo";
+    }
+    return "?";
+}
+
+// Muestra en la barra de titulo la herramienta y el estado de la grilla
 void actualizarTitulo(GLFWwindow* window)
 {
-    std::string titulo = "Mini Paint | Grilla: ";
+    std::string titulo = "Mini Paint | Herramienta: ";
+    titulo += nombreHerramienta(herramientaActual);
+    titulo += " | Grilla: ";
     titulo += mostrarGrilla ? "ON" : "OFF";
-    titulo += "  (G = grilla, C = limpiar)";
+    titulo += "  (1-4 herramienta, G = grilla, C = limpiar)";
     glfwSetWindowTitle(window, titulo.c_str());
 }
 
@@ -412,7 +560,7 @@ void cursor_position_callback(GLFWwindow* window, double xpos, double ypos)
     int filaFin, colFin;
     pixelACelda(window, xpos, ypos, filaFin, colFin);
 
-    vistaPrevia = filtrarValidas(bresenhamLinea(colInicio, filaInicio, colFin, filaFin));
+    vistaPrevia = calcularFigura(herramientaActual, colInicio, filaInicio, colFin, filaFin);
     actualizarBufferPrevia();
 }
 
@@ -429,6 +577,22 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
         break;
     case GLFW_KEY_C:
         limpiarLienzo();
+        break;
+    case GLFW_KEY_1:
+        herramientaActual = HERRAMIENTA_LINEA;
+        actualizarTitulo(window);
+        break;
+    case GLFW_KEY_2:
+        herramientaActual = HERRAMIENTA_TRIANGULO;
+        actualizarTitulo(window);
+        break;
+    case GLFW_KEY_3:
+        herramientaActual = HERRAMIENTA_CUADRADO;
+        actualizarTitulo(window);
+        break;
+    case GLFW_KEY_4:
+        herramientaActual = HERRAMIENTA_CIRCULO;
+        actualizarTitulo(window);
         break;
     case GLFW_KEY_ESCAPE:
         glfwSetWindowShouldClose(window, true);
