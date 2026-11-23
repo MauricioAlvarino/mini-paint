@@ -1,11 +1,12 @@
 // ======================================================================
-//  MINI PAINT - COMMIT 3: pincel, paleta de colores y tamano de pincel
+//  MINI PAINT - COMMIT 4: relleno de primitivas
 //  Controles:
 //    1 = Linea   2 = Triangulo   3 = Cuadrado   4 = Circulo   5 = Pincel
 //    Clic izquierdo + arrastrar : dibuja la figura (vista previa mientras arrastras)
 //    Soltar el clic             : la figura queda guardada en el lienzo
 //    Clic en la paleta          : cambia el color (el blanco sirve de borrador)
 //    Flecha arriba / abajo, rueda del mouse, + / - : cambia el tamano del pincel
+//    F = relleno de figuras (triangulo, cuadrado, circulo) ON/OFF
 //    G = grilla    C = limpiar    ESC = salir
 // ======================================================================
 #include <iostream>
@@ -106,6 +107,7 @@ Herramienta herramientaActual = HERRAMIENTA_LINEA;
 int colorActual = 7;            // indice en PALETA (empieza en azul)
 int tamanoPincel = 1;           // lado del pincel, en celdas
 bool mostrarGrilla = true;      // true = se dibujan las lineas de la grilla
+bool rellenoActivo = false;     // true = las figuras cerradas se rellenan
 bool dibujando = false;         // true mientras el clic izquierdo esta presionado
 
 int filaInicio = 0, colInicio = 0;   // celda donde se hizo clic (inicio de la figura)
@@ -444,8 +446,45 @@ std::vector<Celda> figuraCirculo(int colIni, int filaIni, int colFin, int filaFi
     return bresenhamCirculo(filaIni, colIni, radio);
 }
 
-// Elige la figura segun la herramienta activa (el pincel se maneja aparte)
-std::vector<Celda> calcularFigura(Herramienta herramienta, int colIni, int filaIni, int colFin, int filaFin)
+// RELLENO (scanline): para cada fila del contorno se busca la columna mas a la
+// izquierda y la mas a la derecha, y se pintan todas las celdas entre ellas.
+// Sirve para figuras convexas (triangulo, cuadrado, circulo).
+// Se llama ANTES de filtrar, asi una figura que se sale del lienzo se rellena bien.
+std::vector<Celda> rellenarFilas(const std::vector<Celda>& contorno)
+{
+    std::vector<Celda> relleno;
+    if (contorno.empty())
+        return relleno;
+
+    int minF = contorno[0].fila;
+    int maxF = contorno[0].fila;
+    for (const Celda& c : contorno)
+    {
+        minF = std::min(minF, c.fila);
+        maxF = std::max(maxF, c.fila);
+    }
+
+    int n = maxF - minF + 1;                       // cantidad de filas que ocupa la figura
+    std::vector<int> minC(n, 1000000);             // columna minima de cada fila
+    std::vector<int> maxC(n, -1000000);            // columna maxima de cada fila
+
+    for (const Celda& c : contorno)
+    {
+        int i = c.fila - minF;
+        minC[i] = std::min(minC[i], c.col);
+        maxC[i] = std::max(maxC[i], c.col);
+    }
+
+    for (int i = 0; i < n; i++)
+        for (int col = minC[i]; col <= maxC[i]; col++)
+            relleno.push_back({ minF + i, col });
+
+    return relleno;
+}
+
+// Elige la figura segun la herramienta activa (el pincel se maneja aparte).
+// Si "relleno" es true, el triangulo, el cuadrado y el circulo salen rellenos.
+std::vector<Celda> calcularFigura(Herramienta herramienta, int colIni, int filaIni, int colFin, int filaFin, bool relleno)
 {
     std::vector<Celda> celdas;
 
@@ -466,6 +505,10 @@ std::vector<Celda> calcularFigura(Herramienta herramienta, int colIni, int filaI
     case HERRAMIENTA_PINCEL:
         break;
     }
+
+    // La linea y el pincel no tienen interior, por eso no se rellenan
+    if (relleno && herramienta != HERRAMIENTA_LINEA && herramienta != HERRAMIENTA_PINCEL)
+        celdas = rellenarFilas(celdas);
 
     return filtrarValidas(celdas);
 }
@@ -583,15 +626,17 @@ const char* nombreHerramienta(Herramienta h)
     return "?";
 }
 
-// Muestra en la barra de titulo la herramienta, el tamano y el estado de la grilla
+// Muestra en la barra de titulo la herramienta, el tamano, el relleno y la grilla
 void actualizarTitulo(GLFWwindow* window)
 {
     std::string titulo = "Mini Paint | Herramienta: ";
     titulo += nombreHerramienta(herramientaActual);
     titulo += " | Tamano: " + std::to_string(tamanoPincel);
+    titulo += " | Relleno: ";
+    titulo += rellenoActivo ? "ON" : "OFF";
     titulo += " | Grilla: ";
     titulo += mostrarGrilla ? "ON" : "OFF";
-    titulo += "  (1-5 herramienta, flechas/rueda = tamano, G = grilla, C = limpiar)";
+    titulo += "  (1-5 herramienta, F = relleno, flechas/rueda = tamano, G = grilla, C = limpiar)";
     glfwSetWindowTitle(window, titulo.c_str());
 }
 
@@ -685,8 +730,8 @@ void cursor_position_callback(GLFWwindow* window, double xpos, double ypos)
     }
     else
     {
-        // Figura (linea, triangulo, cuadrado o circulo) con el grosor elegido
-        vistaPrevia = engrosar(calcularFigura(herramientaActual, colInicio, filaInicio, colFin, filaFin), tamanoPincel);
+        // Figura (linea, triangulo, cuadrado o circulo) con el grosor y relleno elegidos
+        vistaPrevia = engrosar(calcularFigura(herramientaActual, colInicio, filaInicio, colFin, filaFin, rellenoActivo), tamanoPincel);
     }
 
     actualizarBufferPrevia();
@@ -727,6 +772,10 @@ void key_callback(GLFWwindow* window, int key, int scancode, int action, int mod
     {
     case GLFW_KEY_G:
         mostrarGrilla = !mostrarGrilla;   // alternar grilla
+        actualizarTitulo(window);
+        break;
+    case GLFW_KEY_F:
+        rellenoActivo = !rellenoActivo;   // alternar relleno
         actualizarTitulo(window);
         break;
     case GLFW_KEY_C:
